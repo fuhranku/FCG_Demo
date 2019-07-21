@@ -1,0 +1,12 @@
+﻿  Camera.cpp
+  Light.cpp
+  main.cpp
+  Model.cpp
+  Shader.cpp
+  stb_image.cpp
+  UserInterface.cpp
+  glad.c
+  Generating code
+  All 908 functions were compiled because no usable IPDB/IOBJ from previous compilation was found.
+  Finished generating code
+  Tarea2_FCG.vcxproj -> C:\Users\ccg\Desktop\Tarea2\Release\Tarea2_FCG.exe
