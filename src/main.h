@@ -72,9 +72,14 @@ unsigned int loadTexture(const char *path);
 bool init();
 
 /*!
- * Render Function
+ * Render Function using forward rendering
  * */
 void render();
+
+/*!
+ * Render Function by using Deferred Shading
+ * */
+void deferredRender();
 
 /*!
  * App's main loop
@@ -92,10 +97,20 @@ void pick();
 */
 void configureDepthMap();
 
+/*! Initializes geometry buffer
+ * to implement deferred shading
+ */
+void configureGBuffer();
+
 /*! 
  * Render scene from camera perspective to a depth map
 */
 void renderToDepthMap();
+
+/*!
+ * Render a full screen size quad
+*/
+void renderQuad();
 
 /*!
  * App starting point

@@ -13,7 +13,7 @@ UI *ui;
 // Shader object
 Shader *lampShader, *pickingShader, *lightShader, *blinnPhongShader, *orenNayarShader,
 	   *cookTorranceShader, *skyboxShader, *reflectionShader, *blendingShader, *depthShader,
-	   *depthQuadShader;
+	   *depthQuadShader, *geometryPassShader, *gQuadDebugShader;
 // ID of 
 GLuint MatrixID, skyboxVAO;
 // Model-View-Projection matrix
@@ -31,10 +31,12 @@ Camera camera;
 unsigned int texture_white, texture_black, texture_blue, cubemapTexture,
 			 depthMapTexture;
 // Frame buffers:
-unsigned int depthMapFBO;
+unsigned int depthMapFBO, gBuffer;
 // Quad for shadow mapping
 unsigned int quadVAO = 0;
 unsigned int quadVBO;
+// tell OpenGL which color attachments we'll use (of this framebuffer) for rendering 
+unsigned int attachments[3];
 //Camera mode:
 bool cameraMode, cameraView = false;
 float pickColor[3] = { 1.0f,0.0f,0.0f };
@@ -108,6 +110,14 @@ void onKeyPress(GLFWwindow* window, int key, int scancode, int action, int mods)
 				reflectionShader =
 					new Shader("assets/shaders/reflection_refraction/reflection.vert",
 						"assets/shaders/reflection_refraction/reflection.frag");
+				delete geometryPassShader;
+				geometryPassShader =
+					new Shader("assets/shaders/deferredShading/gBuffer.vert",
+						"assets/shaders/deferredShading/gBuffer.frag");
+				delete gQuadDebugShader;
+				gQuadDebugShader =
+					new Shader("assets/shaders/deferredShading/fbo_debug.vert",
+						"assets/shaders/deferredShading/fbo_debug.frag");
 				break;
 			case GLFW_KEY_F:
 				if (mods == 1) {
@@ -294,6 +304,51 @@ void configureDepthMap() {
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+void configureGBuffer() {
+	glGenFramebuffers(1, &gBuffer);
+	glBindFramebuffer(GL_FRAMEBUFFER, gBuffer);
+	unsigned int gPosition, gNormal, gAlbedoSpec;
+	// position color buffer
+	glGenTextures(1, &gPosition);
+	glBindTexture(GL_TEXTURE_2D, gPosition);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, windowWidth, windowHeight, 0, GL_RGB, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gPosition, 0);
+
+	// normal color buffer
+	glGenTextures(1, &gNormal);
+	glBindTexture(GL_TEXTURE_2D, gNormal);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, windowWidth, windowHeight, 0, GL_RGB, GL_FLOAT, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, gNormal, 0);
+
+	// color + specular color buffer
+	glGenTextures(1, &gAlbedoSpec);
+	glBindTexture(GL_TEXTURE_2D, gAlbedoSpec);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, windowWidth, windowHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, gAlbedoSpec, 0);
+
+	attachments[0] = GL_COLOR_ATTACHMENT0;
+	attachments[1] = GL_COLOR_ATTACHMENT1;
+	attachments[2] = GL_COLOR_ATTACHMENT2;
+
+	glDrawBuffers(3, attachments);
+	// create and attach depth buffer (renderbuffer)
+	unsigned int rboDepth;
+	glGenRenderbuffers(1, &rboDepth);
+	glBindRenderbuffer(GL_RENDERBUFFER, rboDepth);
+	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, windowWidth, windowHeight);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rboDepth);
+	// finally check if framebuffer is complete
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+		std::cout << "Framebuffer not complete!" << std::endl;
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 bool init() {
 
 	// Initialize the window, glad components and user interface
@@ -334,6 +389,12 @@ bool init() {
 	depthQuadShader =
 		new Shader("assets/shaders/shadowMap/depthQuadShader.vert",
 			"assets/shaders/shadowMap/depthQuadShader.frag");
+	geometryPassShader =
+		new Shader("assets/shaders/deferredShading/gBuffer.vert",
+			"assets/shaders/deferredShading/gBuffer.frag");
+	gQuadDebugShader =
+		new Shader("assets/shaders/deferredShading/fbo_debug.vert",
+			"assets/shaders/deferredShading/fbo_debug.frag");
 
 	// Init directional light
 	Light::initDirectionalLight(&light);
@@ -421,6 +482,8 @@ bool init() {
 
 	// Create shadow map frame buffer
 	configureDepthMap();
+	// Configure g-buffer frame buffer
+	configureGBuffer();
 
 	return true;
 }
@@ -936,6 +999,49 @@ void render(){
 	glDepthFunc(GL_LESS); // set depth function back to default
 }
 
+void deferredRender() {
+	// 1. geometry pass: render scene's geometry/color data into gbuffer
+	// -----------------------------------------------------------------
+	glBindFramebuffer(GL_FRAMEBUFFER, gBuffer);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	glm::mat4 Projection = glm::perspective(glm::radians(45.0f), 4.0f / 3.0f, 0.1f, 100.0f);
+	glm::mat4 View = camera.getWorldToViewMatrix();
+	glm::mat4 ModelMatrix = glm::mat4(1.0f);
+	geometryPassShader->use();
+	geometryPassShader->setMat4("projection", Projection);
+	geometryPassShader->setMat4("view", View);
+	// Draw models and lamps
+	for (auto it = model.begin(); it != model.end(); it++) {
+		ModelMatrix = glm::mat4(1.0f);
+		// Model transformations
+		ModelMatrix = glm::translate(ModelMatrix, (*it)->transformations.translate);
+		ModelMatrix *= Model::toMat4((*it)->transformations.quat);
+		ModelMatrix = glm::scale(ModelMatrix, glm::vec3((*it)->transformations.scale, (*it)->transformations.scale, (*it)->transformations.scale));
+		geometryPassShader->setMat4("model", ModelMatrix);
+		// Send diffuse map
+		geometryPassShader->setInt("diffMap", 0);
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_2D, (*it)->albedo);
+		// Binds the vertex array to be drawn
+		glBindVertexArray((*it)->VAO);
+		// Renders the geometry
+		glDrawArrays(GL_TRIANGLES, 0, (*it)->verticesData.size());
+		glBindVertexArray(0);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+	// 2. Draw a color buffer for debug purposes
+	// -----------------------------------------------------------------
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	// Render depth map
+	gQuadDebugShader->use();
+	gQuadDebugShader->setInt("fboAttachment", 0);
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, attachments[2]);
+	renderQuad();
+
+}
+
 void renderQuad(){
 	if (quadVAO == 0)
 	{
@@ -1024,11 +1130,13 @@ void update(){
     while (!glfwWindowShouldClose(window)){
 		// Checks for keyboard inputs
 		processKeyboardInput(window);
-		// Render from camera perspective
-		renderToDepthMap();
-		// Render everything
-		if (!cameraView)
-			render();
+		// Deferred Shading
+		deferredRender();
+		//// Render from camera perspective
+		//renderToDepthMap();
+		//// Render everything
+		//if (!cameraView)
+		//	render();
 		//Draw AntTweakBar:
 		TwDraw();
 		// Update UI
